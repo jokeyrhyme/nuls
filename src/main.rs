@@ -1,13 +1,14 @@
 #![deny(clippy::all, unsafe_code)]
 
 use std::borrow::Cow;
-use std::path::PathBuf;
 
-use serde::Deserialize;
+use nu::{convert_position, IdeComplete, IdeGotoDef, IdeHover};
 use serde_json::Value;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+
+mod nu;
 
 #[derive(Debug)]
 struct Backend {
@@ -209,49 +210,6 @@ impl LanguageServer for Backend {
             range: None,
         }))
     }
-}
-
-#[derive(Deserialize)]
-struct IdeComplete {
-    completions: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct IdeGotoDef {
-    // end: usize,
-    file: PathBuf,
-    // start: usize,
-}
-
-#[derive(Deserialize)]
-struct IdeHover {
-    hover: String,
-    // span: Option<Range>,
-}
-
-// ported from https://github.com/nushell/vscode-nushell-lang
-fn convert_position(position: &Position, text: &str) -> usize {
-    let mut line = 0;
-    let mut character = 0;
-    let buffer = text.as_bytes();
-
-    let mut i = 0;
-    while i < buffer.len() {
-        if line == position.line && character == position.character {
-            return i;
-        }
-
-        if buffer[i] == 0x0a {
-            line += 1;
-            character = 0;
-        } else {
-            character += 1;
-        }
-
-        i += 1;
-    }
-
-    i
 }
 
 #[tokio::main]

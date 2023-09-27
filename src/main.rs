@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use nu::{convert_position, IdeComplete, IdeGotoDef, IdeHover};
+use nu::{convert_position, convert_span, find_line_breaks, IdeComplete, IdeGotoDef, IdeHover};
 use serde_json::Value;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -150,6 +150,8 @@ impl LanguageServer for Backend {
                 err
             })?;
 
+        let line_breaks = find_line_breaks(&text);
+
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
             uri: Url::from_file_path(goto_def.file).map_err(|e| {
                 let mut err = tower_lsp::jsonrpc::Error::parse_error();
@@ -159,8 +161,10 @@ impl LanguageServer for Backend {
                 );
                 err
             })?,
-            // TODO: port convertSpan() from vscode-nushell-lang
-            range: Range::default(),
+            range: Range {
+                start: convert_span(goto_def.start, &line_breaks),
+                end: convert_span(goto_def.end, &line_breaks),
+            },
         })))
     }
 
@@ -204,10 +208,15 @@ impl LanguageServer for Backend {
             err
         })?;
 
+        let line_breaks = find_line_breaks(&text);
+        let range = hover.span.as_ref().map(|span| Range {
+            start: convert_span(span.start, &line_breaks),
+            end: convert_span(span.end, &line_breaks),
+        });
+
         Ok(Some(Hover {
             contents: HoverContents::Scalar(MarkedString::String(hover.hover)),
-            // TODO: port convertSpan() from vscode-nushell-lang
-            range: None,
+            range,
         }))
     }
 }

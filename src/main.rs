@@ -44,11 +44,54 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        Ok(Some(CompletionResponse::Array(vec![
-            CompletionItem::new_simple("Hello".to_string(), "Some detail".to_string()),
-            CompletionItem::new_simple("Bye".to_string(), "More detail".to_string()),
-        ])))
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let file_path = params
+            .text_document_position
+            .text_document
+            .uri
+            .to_file_path()
+            .map_err(|e| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                    "cannot convert URI to filesystem path: {:?}",
+                    e
+                ))
+            })?;
+        let text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
+            tower_lsp::jsonrpc::Error::invalid_params(format!("cannot read file: {}", e))
+        })?;
+        let index = convert_position(&params.text_document_position.position, &text);
+
+        // TODO: call nushell Rust code directly instead of via separate process
+        let output = tokio::process::Command::new("nu")
+            .args([
+                "--ide-complete",
+                &format!("{}", index),
+                &format!("{}", file_path.display()),
+            ])
+            .output()
+            .await
+            .map_err(|e| {
+                let mut err = tower_lsp::jsonrpc::Error::internal_error();
+                err.data = Some(Value::String(format!("{:?}", e)));
+                err.message = Cow::from("`nu --ide-complete` failed");
+                err
+            })?;
+
+        let complete: IdeComplete =
+            serde_json::from_slice(output.stdout.as_slice()).map_err(|e| {
+                let mut err = tower_lsp::jsonrpc::Error::parse_error();
+                err.data = Some(Value::String(format!("{:?}", e)));
+                err.message = Cow::from("failed to parse response from `nu --ide-complete`");
+                err
+            })?;
+
+        Ok(Some(CompletionResponse::Array(
+            complete
+                .completions
+                .into_iter()
+                .map(|c| CompletionItem::new_simple(c, String::new()))
+                .collect(),
+        )))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -97,6 +140,11 @@ impl LanguageServer for Backend {
             range: None,
         }))
     }
+}
+
+#[derive(Deserialize)]
+struct IdeComplete {
+    completions: Vec<String>,
 }
 
 #[derive(Deserialize)]

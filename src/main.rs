@@ -1,6 +1,7 @@
 #![deny(clippy::all, unsafe_code)]
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,15 +20,25 @@ impl LanguageServer for Backend {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 // TODO: `nu --ide-ast`
-                // TODO: `nu --ide-check`
                 // `nu --ide-complete`
                 completion_provider: Some(CompletionOptions::default()),
-                // TODO: `nu --ide-goto-def`
-                // TODO: `nu --ide-hover`
+                // TODO: `nu --ide-check`
+                // `nu --ide-goto-def`
+                definition_provider: Some(OneOf::Left(true)),
+                // `nu --ide-hover`
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                // TODO: what do we do when the client doesn't support UTF-8 ?
+                position_encoding: Some(PositionEncodingKind::UTF8),
+                // TODO: improve performance by avoiding re-reading files over and over
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                    TextDocumentSyncKind::NONE,
+                )),
                 ..Default::default()
             },
-            ..Default::default()
+            server_info: Some(ServerInfo {
+                name: String::from(env!("CARGO_PKG_NAME")),
+                version: Some(String::from(env!("CARGO_PKG_VERSION"))),
+            }),
         })
     }
 
@@ -94,6 +105,64 @@ impl LanguageServer for Backend {
         )))
     }
 
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let file_path = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_file_path()
+            .map_err(|e| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                    "cannot convert URI to filesystem path: {:?}",
+                    e
+                ))
+            })?;
+        let text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
+            tower_lsp::jsonrpc::Error::invalid_params(format!("cannot read file: {}", e))
+        })?;
+        let index = convert_position(&params.text_document_position_params.position, &text);
+
+        // TODO: call nushell Rust code directly instead of via separate process
+        let output = tokio::process::Command::new("nu")
+            .args([
+                "--ide-goto-def",
+                &format!("{}", index),
+                &format!("{}", file_path.display()),
+            ])
+            .output()
+            .await
+            .map_err(|e| {
+                let mut err = tower_lsp::jsonrpc::Error::internal_error();
+                err.data = Some(Value::String(format!("{:?}", e)));
+                err.message = Cow::from("`nu --ide-goto-def` failed");
+                err
+            })?;
+
+        let goto_def: IdeGotoDef =
+            serde_json::from_slice(output.stdout.as_slice()).map_err(|e| {
+                let mut err = tower_lsp::jsonrpc::Error::parse_error();
+                err.data = Some(Value::String(format!("{:?}", e)));
+                err.message = Cow::from("failed to parse response from `nu --ide-goto-def`");
+                err
+            })?;
+
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+            uri: Url::from_file_path(goto_def.file).map_err(|e| {
+                let mut err = tower_lsp::jsonrpc::Error::parse_error();
+                err.data = Some(Value::String(format!("{:?}", e)));
+                err.message = Cow::from(
+                    "failed to parse filesystem path in response from `nu --ide-goto-def`",
+                );
+                err
+            })?,
+            // TODO: port convertSpan() from vscode-nushell-lang
+            range: Range::default(),
+        })))
+    }
+
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let file_path = params
             .text_document_position_params
@@ -145,6 +214,13 @@ impl LanguageServer for Backend {
 #[derive(Deserialize)]
 struct IdeComplete {
     completions: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct IdeGotoDef {
+    // end: usize,
+    file: PathBuf,
+    // start: usize,
 }
 
 #[derive(Deserialize)]

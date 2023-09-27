@@ -1,3 +1,5 @@
+#![deny(clippy::all, unsafe_code)]
+
 use std::borrow::Cow;
 
 use serde::Deserialize;
@@ -42,7 +44,7 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+    async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
         Ok(Some(CompletionResponse::Array(vec![
             CompletionItem::new_simple("Hello".to_string(), "Some detail".to_string()),
             CompletionItem::new_simple("Bye".to_string(), "More detail".to_string()),

@@ -17,7 +17,7 @@ struct Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 // TODO: `nu --ide-ast`
@@ -43,7 +43,7 @@ impl LanguageServer for Backend {
         })
     }
 
-    async fn initialized(&self, _: InitializedParams) {
+    async fn initialized(&self, _params: InitializedParams) {
         self.client
             .log_message(MessageType::INFO, "server initialized!")
             .await;
@@ -71,13 +71,13 @@ impl LanguageServer for Backend {
         let text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             tower_lsp::jsonrpc::Error::invalid_params(format!("cannot read file: {}", e))
         })?;
-        let index = convert_position(&params.text_document_position.position, &text);
+        let offset = convert_position(&params.text_document_position.position, &text);
 
         // TODO: call nushell Rust code directly instead of via separate process
         let output = tokio::process::Command::new("nu")
             .args([
                 "--ide-complete",
-                &format!("{}", index),
+                &format!("{}", offset),
                 &format!("{}", file_path.display()),
             ])
             .output()
@@ -124,13 +124,13 @@ impl LanguageServer for Backend {
         let text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             tower_lsp::jsonrpc::Error::invalid_params(format!("cannot read file: {}", e))
         })?;
-        let index = convert_position(&params.text_document_position_params.position, &text);
+        let offset = convert_position(&params.text_document_position_params.position, &text);
 
         // TODO: call nushell Rust code directly instead of via separate process
         let output = tokio::process::Command::new("nu")
             .args([
                 "--ide-goto-def",
-                &format!("{}", index),
+                &format!("{}", offset),
                 &format!("{}", file_path.display()),
             ])
             .output()
@@ -151,6 +151,23 @@ impl LanguageServer for Backend {
             })?;
 
         let line_breaks = find_line_breaks(&text);
+
+        if matches!(
+            goto_def.file.to_str(),
+            None | Some("") | Some("__prelude__")
+        ) {
+            return Ok(None);
+        }
+
+        if !goto_def.file.exists() {
+            self.client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("File {} does not exist", goto_def.file.display()),
+                )
+                .await;
+            return Ok(None);
+        }
 
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
             uri: Url::from_file_path(goto_def.file).map_err(|e| {
@@ -183,13 +200,13 @@ impl LanguageServer for Backend {
         let text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             tower_lsp::jsonrpc::Error::invalid_params(format!("cannot read file: {}", e))
         })?;
-        let index = convert_position(&params.text_document_position_params.position, &text);
+        let offset = convert_position(&params.text_document_position_params.position, &text);
 
         // TODO: call nushell Rust code directly instead of via separate process
         let output = tokio::process::Command::new("nu")
             .args([
                 "--ide-hover",
-                &format!("{}", index),
+                &format!("{}", offset),
                 &format!("{}", file_path.display()),
             ])
             .output()

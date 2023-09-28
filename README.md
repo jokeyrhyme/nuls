@@ -18,8 +18,8 @@ Language Server Protocol implementation for nushell
 ## project scope
 
 - `nuls` aims to have all the same LSP-powered features as the Visual Studio Code extension,
-  but working in any IDE/editor that can connect to a language server,
-  e.g. [`helix`](https://helix-editor.com/), [`neovim`](https://neovim.io/), etc
+  but also working in any other IDE/editor that can connect to a language server,
+  e.g. [`helix`](https://helix-editor.com/), [`lapce`](https://lapce.dev/), [`neovim`](https://neovim.io/), [`zed`](https://zed.dev/), etc
 
 - for now, please keep feature requests and bug reports focused on this goal
 

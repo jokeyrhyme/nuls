@@ -7,6 +7,7 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+lsp-textdocument = { git = "https://github.com/GiveMe-A-Name/lsp-textdocument.git", rev = "ad5525b" }
 mktemp = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

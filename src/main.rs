@@ -3,22 +3,23 @@
 use std::{borrow::Cow, ffi::OsStr, sync::RwLock};
 
 use error::map_err_to_parse_error;
-use nu::{
-    convert_position, convert_span, find_line_breaks, run_compiler, IdeComplete, IdeGotoDef,
-    IdeHover, IdeSettings,
-};
+use lsp_textdocument::TextDocuments;
+use nu::{run_compiler, IdeComplete, IdeGotoDef, IdeHover, IdeSettings};
 
-use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::notification::{
+    DidChangeTextDocument, DidCloseTextDocument, Notification,
+};
 #[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
+use tower_lsp::{jsonrpc::Result, lsp_types::notification::DidOpenTextDocument};
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 mod error;
 mod nu;
 
-#[derive(Debug)]
 struct Backend {
     client: Client,
+    documents: RwLock<TextDocuments>,
     ide_settings: RwLock<IdeSettings>,
 }
 impl Backend {
@@ -31,10 +32,91 @@ impl Backend {
             })?
             .clone())
     }
+
+    fn try_did_change(&self, params: DidChangeTextDocumentParams) -> Result<()> {
+        let mut documents = self.documents.write().map_err(|e| {
+            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "cannot write to document cache: {e:?}"
+            ))
+        })?;
+        let params = serde_json::to_value(params).map_err(|e| {
+            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "cannot convert client parameters: {e:?}"
+            ))
+        })?;
+        documents.listen(<DidChangeTextDocument as Notification>::METHOD, &params);
+        Ok(())
+    }
+
+    fn try_did_close(&self, params: DidCloseTextDocumentParams) -> Result<()> {
+        let mut documents = self.documents.write().map_err(|e| {
+            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "cannot write to document cache: {e:?}"
+            ))
+        })?;
+        let params = serde_json::to_value(params).map_err(|e| {
+            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "cannot convert client parameters: {e:?}"
+            ))
+        })?;
+        documents.listen(<DidCloseTextDocument as Notification>::METHOD, &params);
+        Ok(())
+    }
+
+    fn try_did_open(&self, params: DidOpenTextDocumentParams) -> Result<()> {
+        let mut documents = self.documents.write().map_err(|e| {
+            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "cannot write to document cache: {e:?}"
+            ))
+        })?;
+        let params = serde_json::to_value(params).map_err(|e| {
+            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "cannot convert client parameters: {e:?}"
+            ))
+        })?;
+        documents.listen(<DidOpenTextDocument as Notification>::METHOD, &params);
+        Ok(())
+    }
 }
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        if let Err(e) = self.try_did_change(params) {
+            self.client
+                .log_message(MessageType::ERROR, format!("{e:?}"))
+                .await;
+        }
+    }
+
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "workspace folders: added={:?}; removed={:?}",
+                    params.event.added, params.event.removed
+                ),
+            )
+            .await;
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        if let Err(e) = self.try_did_close(params) {
+            self.client
+                .log_message(MessageType::ERROR, format!("{e:?}"))
+                .await;
+        }
+    }
+
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        if let Err(e) = self.try_did_open(params) {
+            self.client
+                .log_message(MessageType::ERROR, format!("{e:?}"))
+                .await;
+        }
+    }
+
     async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -46,11 +128,11 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 // `nu --ide-hover`
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
-                // TODO: what do we do when the client doesn't support UTF-8 ?
-                position_encoding: Some(PositionEncodingKind::UTF8),
-                // TODO: improve performance by avoiding re-reading files over and over
+                // TODO: what do we do when the client doesn't support UTF-16 ?
+                // lsp-textdocument crate requires UTF-16
+                position_encoding: Some(PositionEncodingKind::UTF16),
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::NONE,
+                    TextDocumentSyncKind::INCREMENTAL,
                 )),
                 workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: Some(WorkspaceFoldersServerCapabilities {
@@ -82,20 +164,25 @@ impl LanguageServer for Backend {
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let file_path = params
-            .text_document_position
-            .text_document
-            .uri
-            .to_file_path()
-            .map_err(|e| {
+        let uri = params.text_document_position.text_document.uri;
+        let (text, offset) = {
+            let documents = self.documents.read().map_err(|e| {
                 tower_lsp::jsonrpc::Error::invalid_params(format!(
-                    "cannot convert URI to filesystem path: {e:?}",
+                    "cannot read from document cache: {e:?}"
                 ))
             })?;
-        let text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
-            tower_lsp::jsonrpc::Error::invalid_params(format!("cannot read file: {e:?}"))
-        })?;
-        let offset = convert_position(params.text_document_position.position, &text);
+            let doc =
+                documents
+                    .get_document(&uri)
+                    .ok_or(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                        "{uri} not found in document cache"
+                    )))?;
+
+            (
+                String::from(doc.get_content(None)),
+                doc.offset_at(params.text_document_position.position),
+            )
+        };
 
         let ide_settings = self.get_document_settings()?;
         let output = run_compiler(
@@ -105,7 +192,7 @@ impl LanguageServer for Backend {
                 OsStr::new(&format!("{offset}")),
             ],
             ide_settings,
-            params.text_document_position.text_document.uri,
+            &uri,
         )
         .await?;
 
@@ -127,20 +214,25 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let file_path = params
-            .text_document_position_params
-            .text_document
-            .uri
-            .to_file_path()
-            .map_err(|e| {
+        let uri = params.text_document_position_params.text_document.uri;
+        let (text, offset) = {
+            let documents = self.documents.read().map_err(|e| {
                 tower_lsp::jsonrpc::Error::invalid_params(format!(
-                    "cannot convert URI to filesystem path: {e:?}",
+                    "cannot read from document cache: {e:?}"
                 ))
             })?;
-        let text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
-            tower_lsp::jsonrpc::Error::invalid_params(format!("cannot read file: {e:?}"))
-        })?;
-        let offset = convert_position(params.text_document_position_params.position, &text);
+            let doc =
+                documents
+                    .get_document(&uri)
+                    .ok_or(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                        "{uri} not found in document cache"
+                    )))?;
+
+            (
+                String::from(doc.get_content(None)),
+                doc.offset_at(params.text_document_position_params.position),
+            )
+        };
 
         let ide_settings = self.get_document_settings()?;
         let output = run_compiler(
@@ -150,7 +242,7 @@ impl LanguageServer for Backend {
                 OsStr::new(&format!("{offset}")),
             ],
             ide_settings,
-            params.text_document_position_params.text_document.uri,
+            &uri,
         )
         .await?;
 
@@ -158,8 +250,6 @@ impl LanguageServer for Backend {
             serde_json::from_slice(output.stdout.as_bytes()).map_err(|e| {
                 map_err_to_parse_error(e, format!("cannot parse response from {}", output.cmdline))
             })?;
-
-        let line_breaks = find_line_breaks(&text);
 
         if matches!(goto_def.file.to_str(), None | Some("" | "__prelude__")) {
             return Ok(None);
@@ -175,6 +265,25 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
+        let range = {
+            let documents = self.documents.read().map_err(|e| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                    "cannot read from document cache: {e:?}"
+                ))
+            })?;
+            let doc =
+                documents
+                    .get_document(&uri)
+                    .ok_or(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                        "{uri} not found in document cache"
+                    )))?;
+
+            Range {
+                start: doc.position_at(goto_def.start),
+                end: doc.position_at(goto_def.end),
+            }
+        };
+
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
             uri: Url::from_file_path(goto_def.file).map_err(|_| {
                 let mut err = tower_lsp::jsonrpc::Error::parse_error();
@@ -183,35 +292,37 @@ impl LanguageServer for Backend {
                 );
                 err
             })?,
-            range: Range {
-                start: convert_span(goto_def.start, &line_breaks),
-                end: convert_span(goto_def.end, &line_breaks),
-            },
+            range,
         })))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let file_path = params
-            .text_document_position_params
-            .text_document
-            .uri
-            .to_file_path()
-            .map_err(|e| {
+        let uri = params.text_document_position_params.text_document.uri;
+        let (text, offset) = {
+            let documents = self.documents.read().map_err(|e| {
                 tower_lsp::jsonrpc::Error::invalid_params(format!(
-                    "cannot convert URI to filesystem path: {e:?}",
+                    "cannot read from document cache: {e:?}"
                 ))
             })?;
-        let text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
-            tower_lsp::jsonrpc::Error::invalid_params(format!("cannot read file: {e:?}"))
-        })?;
-        let offset = convert_position(params.text_document_position_params.position, &text);
+            let doc =
+                documents
+                    .get_document(&uri)
+                    .ok_or(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                        "{uri} not found in document cache"
+                    )))?;
+
+            (
+                String::from(doc.get_content(None)),
+                doc.offset_at(params.text_document_position_params.position),
+            )
+        };
 
         let ide_settings = self.get_document_settings()?;
         let output = run_compiler(
             &text,
             vec![OsStr::new("--ide-hover"), OsStr::new(&format!("{offset}"))],
             ide_settings,
-            params.text_document_position_params.text_document.uri,
+            &uri,
         )
         .await?;
 
@@ -219,28 +330,29 @@ impl LanguageServer for Backend {
             map_err_to_parse_error(e, format!("cannot parse response from {}", output.cmdline))
         })?;
 
-        let line_breaks = find_line_breaks(&text);
-        let range = hover.span.as_ref().map(|span| Range {
-            start: convert_span(span.start, &line_breaks),
-            end: convert_span(span.end, &line_breaks),
-        });
+        let range = {
+            let documents = self.documents.read().map_err(|e| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                    "cannot read from document cache: {e:?}"
+                ))
+            })?;
+            let doc =
+                documents
+                    .get_document(&uri)
+                    .ok_or(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                        "{uri} not found in document cache"
+                    )))?;
+
+            hover.span.as_ref().map(|span| Range {
+                start: doc.position_at(span.start),
+                end: doc.position_at(span.end),
+            })
+        };
 
         Ok(Some(Hover {
             contents: HoverContents::Scalar(MarkedString::String(hover.hover)),
             range,
         }))
-    }
-
-    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!(
-                    "workspace folders: added={:?}; removed={:?}",
-                    params.event.added, params.event.removed
-                ),
-            )
-            .await;
     }
 }
 
@@ -251,6 +363,7 @@ async fn main() {
 
     let (service, socket) = LspService::new(|client| Backend {
         client,
+        documents: RwLock::new(TextDocuments::new()),
         ide_settings: RwLock::new(IdeSettings::default()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;

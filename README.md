@@ -46,6 +46,9 @@ Language Server Protocol implementation for nushell
 
 - [ ] [textDocument/diagnostic](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_pullDiagnostics) -> `nu --ide-check`
 - [ ] [textDocument/formatting](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_formatting) -> [`nufmt`](https://github.com/nushell/nufmt)
+- [ ] [workspace/configuration](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#workspace_configuration)
+- [ ] [workspace/didChangeConfiguration](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#workspace_didChangeConfiguration)
+- [ ] [window/workDoneProgress/create](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#workspace_didChangeConfiguration) and [window/workDoneProgress/cancel](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#window_workDoneProgress_cancel)
 - [ ] raise a PR for `vscode-nushell-lang` to replace its wrapper/glue code with `nuls`
 
 ## getting started
@@ -56,7 +59,7 @@ Language Server Protocol implementation for nushell
 
 - add the following to your languages.toml:
 
-  ```
+  ```toml
   [[language]]
   name = "nu"
   auto-format = false
@@ -68,10 +71,27 @@ Language Server Protocol implementation for nushell
   shebangs = ["nu"]
   ```
 
+### `helix` with [multiple language servers per language](https://github.com/helix-editor/helix/pull/2507)
+
+recent-enough commits of `helix` now include the nushell grammar and language definition out-of-the-box,
+so all we need to do here tell it to use `nuls`
+
+- add the following to your languages.toml:
+
+  ```toml
+  [language-server.nuls]
+  command = "nuls" # or "some/path/to/nuls"
+
+  [[language]]
+  name = "nu"
+  language-servers = [ "nuls" ]
+  ```
+
 ## see also
 
 - http://www.nushell.sh/
 - https://github.com/nushell/vscode-nushell-lang
 - https://github.com/nushell/vscode-nushell-lang/issues/117
 - https://github.com/nushell/tree-sitter-nu
+- https://github.com/tree-sitter/tree-sitter
 - https://microsoft.github.io/language-server-protocol/

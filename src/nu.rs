@@ -1,15 +1,68 @@
 use std::{ffi::OsStr, path::PathBuf, time::Duration};
 
+use lsp_textdocument::FullTextDocument;
 use serde::Deserialize;
 use tokio::fs;
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{DiagnosticSeverity, Range, Url};
+use tower_lsp::{jsonrpc::Result, lsp_types::Diagnostic};
 
 use crate::error::{map_err_to_internal_error, map_err_to_parse_error};
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase", tag = "type")]
+pub(crate) enum IdeCheck {
+    Diagnostic(IdeCheckDiagnostic),
+    Hint(IdeCheckHint),
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub(crate) struct IdeCheckDiagnostic {
+    pub message: String,
+    pub severity: IdeDiagnosticSeverity,
+    pub span: IdeSpan,
+}
+impl IdeCheckDiagnostic {
+    pub fn to_diagnostic(&self, doc: &FullTextDocument, uri: &Url) -> Diagnostic {
+        Diagnostic {
+            message: self.message.clone(),
+            range: Range {
+                end: doc.position_at(self.span.end),
+                start: doc.position_at(self.span.start),
+            },
+            severity: Some(DiagnosticSeverity::from(&self.severity)),
+            source: Some(String::from(uri.clone())),
+            ..Diagnostic::default()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub(crate) struct IdeCheckHint {
+    pub position: IdeSpan,
+    pub typename: String,
+}
 
 #[derive(Deserialize)]
 pub(crate) struct IdeComplete {
     pub completions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub(crate) enum IdeDiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+impl From<&IdeDiagnosticSeverity> for DiagnosticSeverity {
+    fn from(value: &IdeDiagnosticSeverity) -> Self {
+        match value {
+            IdeDiagnosticSeverity::Error => Self::ERROR,
+            IdeDiagnosticSeverity::Warning => Self::WARNING,
+            IdeDiagnosticSeverity::Information => Self::INFORMATION,
+            IdeDiagnosticSeverity::Hint => Self::HINT,
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -23,10 +76,10 @@ pub(crate) struct IdeGotoDef {
 #[derive(Deserialize)]
 pub(crate) struct IdeHover {
     pub hover: String,
-    pub span: Option<IdeHoverSpan>,
+    pub span: Option<IdeSpan>,
 }
-#[derive(Deserialize)]
-pub(crate) struct IdeHoverSpan {
+#[derive(Debug, Deserialize, PartialEq)]
+pub(crate) struct IdeSpan {
     pub end: u32,
     pub start: u32,
 }
@@ -134,4 +187,63 @@ pub(crate) async fn run_compiler(
         map_err_to_parse_error(e, format!("`{cmdline}` did not return valid UTF-8"))
     })?;
     Ok(CompilerResponse { cmdline, stdout })
+}
+
+#[cfg(test)]
+mod tests {
+    use tower_lsp::lsp_types::{DiagnosticSeverity, Position};
+
+    use super::*;
+
+    #[test]
+    fn deserialize_ide_check_diagnostic() {
+        let input = r#"{"message":"Missing required positional argument.","severity":"Error","span":{"end":1026,"start":1026},"type":"diagnostic"}"#;
+
+        let got: IdeCheck = serde_json::from_str(input).expect("cannot deserialize");
+
+        assert_eq!(
+            got,
+            IdeCheck::Diagnostic(IdeCheckDiagnostic {
+                message: String::from("Missing required positional argument."),
+                severity: IdeDiagnosticSeverity::Error,
+                span: IdeSpan {
+                    end: 1026,
+                    start: 1026
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn ide_check_diagnostic_to_diagnostic() {
+        let input = IdeCheckDiagnostic {
+            message: String::from("Missing required positional argument."),
+            severity: IdeDiagnosticSeverity::Error,
+            span: IdeSpan { end: 0, start: 0 },
+        };
+        let doc = FullTextDocument::new(String::new(), 0, String::from("foo"));
+        let uri = Url::parse("file:///foo").expect("cannot parse URL");
+
+        let got = input.to_diagnostic(&doc, &uri);
+
+        assert_eq!(
+            got,
+            Diagnostic {
+                message: String::from("Missing required positional argument."),
+                range: Range {
+                    end: Position {
+                        line: 0,
+                        character: 0
+                    },
+                    start: Position {
+                        line: 0,
+                        character: 0
+                    },
+                },
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some(uri.to_string()),
+                ..Diagnostic::default()
+            }
+        );
+    }
 }

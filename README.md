@@ -53,6 +53,17 @@ Language Server Protocol implementation for nushell
 
 ## getting started
 
+- it's still an open question as to how this project will be distributed and in what form
+
+- we'd like to tackle those specific in close collaboration with the nushell maintainers ([#3](https://github.com/jokeyrhyme/nuls/issues/3)),
+  perhaps once we're a little closer to integation with the Visual Studio Code extension ([#9](https://github.com/jokeyrhyme/nuls/issues/9))
+
+### installation
+
+1. you'll need a [stable Rust toolchain](https://www.rust-lang.org/)
+
+2. `cargo install --git https://github.com/jokeyrhyme/nuls.git --locked`
+
 ### `helix` (23.05)
 
 - (optional) follow https://github.com/nushell/tree-sitter-nu/blob/main/installation/helix.md for the treesitter grammar

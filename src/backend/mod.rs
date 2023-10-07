@@ -1,4 +1,5 @@
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use std::{ffi::OsStr, sync::RwLock};
 
 pub(crate) mod language_server;
@@ -21,6 +22,7 @@ pub(crate) struct Backend {
     client: Client,
     documents: RwLock<TextDocuments>,
     ide_settings: RwLock<IdeSettings>,
+    last_validated: RwLock<Instant>,
 }
 
 impl Backend {
@@ -53,7 +55,29 @@ impl Backend {
             client,
             documents: RwLock::new(TextDocuments::new()),
             ide_settings: RwLock::new(IdeSettings::default()),
+            last_validated: RwLock::new(Instant::now()),
         }
+    }
+
+    async fn throttled_validate_document(&self, uri: &Url) -> Result<()> {
+        // TODO: this is a quick imperfect hack, but eventually we probably want a thorough solution using threads/channels?
+        // TODO: ensure that we validate at least once after the most recent throttling (i.e. debounce instead of throttle)
+        let then = {
+            *self.last_validated.read().map_err(|e| {
+                map_err_to_internal_error(&e, format!("cannot read throttling marker: {e:?}"))
+            })?
+        };
+        if then.elapsed() < Duration::from_millis(500) {
+            return Ok(());
+        }
+
+        self.validate_document(uri).await?;
+
+        let mut then = self.last_validated.write().map_err(|e| {
+            map_err_to_internal_error(&e, format!("cannot write throttling marker: {e:?}"))
+        })?;
+        *then = Instant::now();
+        Ok(())
     }
 
     fn try_did_change(&self, params: DidChangeTextDocumentParams) -> Result<()> {

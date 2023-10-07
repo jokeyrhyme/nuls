@@ -14,12 +14,17 @@ use tower_lsp::LanguageServer;
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let uri = params.text_document.uri.clone();
         if let Err(e) = self.try_did_change(params) {
             self.client
                 .log_message(MessageType::ERROR, format!("{e:?}"))
                 .await;
         }
-        // TODO: trigger debounced `nu --ide-check`
+        if let Err(e) = self.throttled_validate_document(&uri).await {
+            self.client
+                .log_message(MessageType::ERROR, format!("{e:?}"))
+                .await;
+        };
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
@@ -49,7 +54,6 @@ impl LanguageServer for Backend {
                 .log_message(MessageType::ERROR, format!("{e:?}"))
                 .await;
         }
-        // TODO: trigger debounced `nu --ide-check` instead
         if let Err(e) = self.validate_document(&uri).await {
             self.client
                 .log_message(MessageType::ERROR, format!("{e:?}"))

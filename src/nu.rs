@@ -85,7 +85,8 @@ pub(crate) struct IdeSpan {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub(crate) struct IdeSettings {
     pub hints: IdeSettingsHints,
     pub include_dirs: Vec<PathBuf>,
@@ -106,7 +107,8 @@ impl Default for IdeSettings {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub(crate) struct IdeSettingsHints {
     pub show_inferred_types: bool,
 }

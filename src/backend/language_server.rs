@@ -62,8 +62,20 @@ impl LanguageServer for Backend {
     }
 
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        if self
-            .can_publish_diagnostics
+        // panic: this is the only place we `OnceLock::set`,
+        // so we've entered strange territory if something else writes to them first
+
+        self.can_lookup_configuration
+            .set(matches!(
+                params.capabilities.workspace,
+                Some(WorkspaceClientCapabilities {
+                    configuration: Some(_),
+                    ..
+                })
+            ))
+            .expect("server value initialized out of sequence");
+
+        self.can_publish_diagnostics
             .set(matches!(
                 params.capabilities.text_document,
                 Some(TextDocumentClientCapabilities {
@@ -71,22 +83,12 @@ impl LanguageServer for Backend {
                     ..
                 })
             ))
-            .is_err()
-        {
-            self.client
-                .log_message(
-                    MessageType::ERROR,
-                    "diagnostic setting was initialized unexpectedly",
-                )
-                .await;
-        }
+            .expect("server value initialized out of sequence");
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                // TODO: `nu --ide-ast`
                 // `nu --ide-complete`
                 completion_provider: Some(CompletionOptions::default()),
-                // TODO: `nu --ide-check`
                 // `nu --ide-goto-def`
                 definition_provider: Some(OneOf::Left(true)),
                 // `nu --ide-hover`
@@ -135,7 +137,7 @@ impl LanguageServer for Backend {
             )
         })?;
 
-        let ide_settings = self.get_document_settings()?;
+        let ide_settings = self.get_document_settings(&uri).await?;
         let output = run_compiler(
             &text,
             vec![
@@ -173,7 +175,7 @@ impl LanguageServer for Backend {
             )
         })?;
 
-        let ide_settings = self.get_document_settings()?;
+        let ide_settings = self.get_document_settings(&uri).await?;
         let output = run_compiler(
             &text,
             vec![
@@ -210,7 +212,7 @@ impl LanguageServer for Backend {
         })?;
 
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri: Url::from_file_path(goto_def.file).map_err(|_| {
+            uri: Url::from_file_path(goto_def.file).map_err(|()| {
                 let mut err = tower_lsp::jsonrpc::Error::parse_error();
                 err.message = Cow::from(
                     "failed to parse filesystem path in response from `nu --ide-goto-def`",
@@ -230,7 +232,7 @@ impl LanguageServer for Backend {
             )
         })?;
 
-        let ide_settings = self.get_document_settings()?;
+        let ide_settings = self.get_document_settings(&uri).await?;
         let output = run_compiler(
             &text,
             vec![OsStr::new("--ide-hover"), OsStr::new(&format!("{offset}"))],

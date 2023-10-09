@@ -18,10 +18,10 @@ use tower_lsp::Client;
 use tower_lsp::{jsonrpc::Result, lsp_types::notification::DidOpenTextDocument};
 
 pub(crate) struct Backend {
+    can_lookup_configuration: OnceLock<bool>,
     can_publish_diagnostics: OnceLock<bool>,
     client: Client,
     documents: RwLock<TextDocuments>,
-    ide_settings: RwLock<IdeSettings>,
     last_validated: RwLock<Instant>,
 }
 
@@ -41,20 +41,30 @@ impl Backend {
         Ok(f(doc))
     }
 
-    fn get_document_settings(&self) -> Result<IdeSettings> {
-        Ok(self
-            .ide_settings
-            .read()
-            .map_err(|e| map_err_to_internal_error(&e, format!("cannot read settings: {e:?}")))?
-            .clone())
+    async fn get_document_settings(&self, uri: &Url) -> Result<IdeSettings> {
+        if *self.can_lookup_configuration.get().unwrap_or(&false) {
+            let values = self
+                .client
+                .configuration(vec![ConfigurationItem {
+                    scope_uri: Some(uri.clone()),
+                    section: Some(String::from("nushellLanguageServer")),
+                }])
+                .await?;
+
+            if let Some(value) = values.into_iter().next() {
+                return Ok(serde_json::from_value::<IdeSettings>(value).unwrap_or_default());
+            }
+        }
+
+        Ok(IdeSettings::default())
     }
 
     pub fn new(client: Client) -> Self {
         Self {
+            can_lookup_configuration: OnceLock::new(),
             can_publish_diagnostics: OnceLock::new(),
             client,
             documents: RwLock::new(TextDocuments::new()),
-            ide_settings: RwLock::new(IdeSettings::default()),
             last_validated: RwLock::new(Instant::now()),
         }
     }
@@ -120,7 +130,7 @@ impl Backend {
     }
 
     async fn validate_document(&self, uri: &Url) -> Result<()> {
-        let can_publish_diagnostics = self.can_publish_diagnostics.get_or_init(|| false);
+        let can_publish_diagnostics = self.can_publish_diagnostics.get().unwrap_or(&false);
         if !can_publish_diagnostics {
             self.client
                 .log_message(
@@ -133,7 +143,7 @@ impl Backend {
 
         let text = self.for_document(uri, &|doc| String::from(doc.get_content(None)))?;
 
-        let ide_settings = self.get_document_settings()?;
+        let ide_settings = self.get_document_settings(uri).await?;
         let output =
             run_compiler(&text, vec![OsStr::new("--ide-check")], ide_settings, uri).await?;
 

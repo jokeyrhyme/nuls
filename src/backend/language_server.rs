@@ -149,18 +149,9 @@ impl LanguageServer for Backend {
         )
         .await?;
 
-        let complete: IdeComplete =
-            serde_json::from_slice(output.stdout.as_bytes()).map_err(|e| {
-                map_err_to_parse_error(e, format!("cannot parse response from {}", output.cmdline))
-            })?;
+        let complete = IdeComplete::try_from(output)?;
 
-        Ok(Some(CompletionResponse::Array(
-            complete
-                .completions
-                .into_iter()
-                .map(|c| CompletionItem::new_simple(c, String::new()))
-                .collect(),
-        )))
+        Ok(Some(CompletionResponse::from(complete)))
     }
 
     async fn goto_definition(

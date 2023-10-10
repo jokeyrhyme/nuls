@@ -3,7 +3,9 @@ use std::{ffi::OsStr, path::PathBuf, time::Duration};
 use lsp_textdocument::FullTextDocument;
 use serde::Deserialize;
 use tokio::fs;
-use tower_lsp::lsp_types::{DiagnosticSeverity, Range, Url};
+use tower_lsp::lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionResponse, DiagnosticSeverity, Range, Url,
+};
 use tower_lsp::{jsonrpc::Result, lsp_types::Diagnostic};
 
 use crate::error::{map_err_to_internal_error, map_err_to_parse_error};
@@ -45,6 +47,39 @@ pub(crate) struct IdeCheckHint {
 #[derive(Deserialize)]
 pub(crate) struct IdeComplete {
     pub completions: Vec<String>,
+}
+impl TryFrom<CompilerResponse> for IdeComplete {
+    type Error = tower_lsp::jsonrpc::Error;
+
+    fn try_from(value: CompilerResponse) -> std::result::Result<Self, Self::Error> {
+        serde_json::from_slice(value.stdout.as_bytes()).map_err(|e| {
+            map_err_to_parse_error(e, format!("cannot parse response from {}", value.cmdline))
+        })
+    }
+}
+impl From<IdeComplete> for CompletionResponse {
+    fn from(value: IdeComplete) -> Self {
+        CompletionResponse::Array(
+            value
+                .completions
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let kind = if c.contains('(') {
+                        CompletionItemKind::FUNCTION
+                    } else {
+                        CompletionItemKind::FIELD
+                    };
+                    CompletionItem {
+                        data: Some(serde_json::Value::from(i + 1)),
+                        kind: Some(kind),
+                        label: c,
+                        ..Default::default()
+                    }
+                })
+                .collect(),
+        )
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -247,5 +282,37 @@ mod tests {
                 ..Diagnostic::default()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn completion_ok() {
+        let output = run_compiler(
+            "wh",
+            vec![OsStr::new("--ide-complete"), OsStr::new(&format!("{}", 2))],
+            IdeSettings::default(),
+            &Url::parse("file:///foo.nu").expect("unable to parse test URL"),
+        )
+        .await
+        .expect("unable to run `nu --ide-complete ...`");
+
+        let complete = IdeComplete::try_from(output)
+            .expect("unable to convert output from `nu --ide-complete ...`");
+        let got = CompletionResponse::from(complete);
+
+        if let CompletionResponse::Array(v) = &got {
+            // sequence is non-deterministic,
+            // so this is more reliable than using an assert_eq!() for the whole collection
+            v.iter()
+                .find(|c| c.label == *"where" || c.kind == Some(CompletionItemKind::FIELD))
+                .expect("'where' not in list");
+            v.iter()
+                .find(|c| c.label == *"which" || c.kind == Some(CompletionItemKind::FIELD))
+                .expect("'which' not in list");
+            v.iter()
+                .find(|c| c.label == *"while" || c.kind == Some(CompletionItemKind::FIELD))
+                .expect("'while' not in list");
+        } else {
+            unreachable!();
+        }
     }
 }

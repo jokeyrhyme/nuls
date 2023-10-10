@@ -13,10 +13,16 @@ env:
 jobs:
   build:
 
+    container: rust:alpine
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v3
+    - name: dependencies
+      run: |
+        apk update
+        apk add npm
+        npm install --global nushell
     - name: Build
       run: cargo build --all-features --all-targets --workspace
     - name: Run formatter

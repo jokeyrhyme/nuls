@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use std::{ffi::OsStr, sync::RwLock};
@@ -9,6 +10,7 @@ use crate::{
 };
 use lsp_textdocument::{FullTextDocument, TextDocuments};
 
+use serde::Deserialize;
 use tower_lsp::lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, Notification,
 };
@@ -18,10 +20,13 @@ use tower_lsp::Client;
 use tower_lsp::{jsonrpc::Result, lsp_types::notification::DidOpenTextDocument};
 
 pub(crate) struct Backend {
+    can_change_configuration: OnceLock<bool>,
     can_lookup_configuration: OnceLock<bool>,
     can_publish_diagnostics: OnceLock<bool>,
     client: Client,
     documents: RwLock<TextDocuments>,
+    document_settings: RwLock<HashMap<Url, IdeSettings>>,
+    global_settings: RwLock<IdeSettings>,
     last_validated: RwLock<Instant>,
 }
 
@@ -42,29 +47,73 @@ impl Backend {
     }
 
     async fn get_document_settings(&self, uri: &Url) -> Result<IdeSettings> {
-        if *self.can_lookup_configuration.get().unwrap_or(&false) {
-            let values = self
-                .client
-                .configuration(vec![ConfigurationItem {
-                    scope_uri: Some(uri.clone()),
-                    section: Some(String::from("nushellLanguageServer")),
-                }])
-                .await?;
+        if !self.can_lookup_configuration.get().unwrap_or(&false) {
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    "no per-document settings lookup capability, returning global settings ...",
+                )
+                .await;
+            let global_settings = self.global_settings.read().map_err(|e| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                    "cannot read global settings: {e:?}"
+                ))
+            })?;
+            return Ok(global_settings.clone());
+        }
 
-            if let Some(value) = values.into_iter().next() {
-                return Ok(serde_json::from_value::<IdeSettings>(value).unwrap_or_default());
+        {
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    "checking per-document settings cache ...",
+                )
+                .await;
+            let document_settings = self.document_settings.read().map_err(|e| {
+                map_err_to_internal_error(&e, format!("cannot read per-document settings: {e:?}"))
+            })?;
+            if let Some(settings) = document_settings.get(uri) {
+                return Ok(settings.clone());
             }
         }
 
+        self.client
+            .log_message(
+                MessageType::INFO,
+                "fetching per-document settings for cache ...",
+            )
+            .await;
+        let values = self
+            .client
+            .configuration(vec![ConfigurationItem {
+                scope_uri: Some(uri.clone()),
+                section: Some(String::from("nushellLanguageServer")),
+            }])
+            .await?;
+        if let Some(value) = values.into_iter().next() {
+            let settings: IdeSettings = serde_json::from_value(value).unwrap_or_default();
+            let mut document_settings = self.document_settings.write().map_err(|e| {
+                map_err_to_internal_error(&e, format!("cannot write per-document settings: {e:?}"))
+            })?;
+            document_settings.insert(uri.clone(), settings.clone());
+            return Ok(settings);
+        }
+
+        self.client
+            .log_message(MessageType::INFO, "fallback, returning default settings")
+            .await;
         Ok(IdeSettings::default())
     }
 
     pub fn new(client: Client) -> Self {
         Self {
+            can_change_configuration: OnceLock::new(),
             can_lookup_configuration: OnceLock::new(),
             can_publish_diagnostics: OnceLock::new(),
             client,
             documents: RwLock::new(TextDocuments::new()),
+            document_settings: RwLock::new(HashMap::new()),
+            global_settings: RwLock::new(IdeSettings::default()),
             last_validated: RwLock::new(Instant::now()),
         }
     }
@@ -100,6 +149,40 @@ impl Backend {
             ))
         })?;
         documents.listen(<DidChangeTextDocument as Notification>::METHOD, &params);
+        Ok(())
+    }
+
+    async fn try_did_change_configuration(
+        &self,
+        params: DidChangeConfigurationParams,
+    ) -> Result<()> {
+        if *self.can_lookup_configuration.get().unwrap_or(&false) {
+            let mut document_settings = self.document_settings.write().map_err(|e| {
+                map_err_to_internal_error(&e, format!("cannot write per-document settings: {e:?}"))
+            })?;
+            document_settings.clear();
+        } else {
+            let settings: ClientSettingsPayload =
+                serde_json::from_value(params.settings).unwrap_or_default();
+            let mut global_settings = self.global_settings.write().map_err(|e| {
+                map_err_to_internal_error(&e, format!("cannot write global settings: {e:?}"))
+            })?;
+            *global_settings = settings.nushell_language_server;
+        }
+
+        // Revalidate all open text documents
+        let uris: Vec<Url> = {
+            let documents = self.documents.read().map_err(|e| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                    "cannot read from document cache: {e:?}"
+                ))
+            })?;
+            documents.documents().keys().cloned().collect()
+        };
+        for uri in uris {
+            self.validate_document(&uri).await?;
+        }
+
         Ok(())
     }
 
@@ -173,4 +256,10 @@ impl Backend {
 
         Ok(())
     }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ClientSettingsPayload {
+    nushell_language_server: IdeSettings,
 }

@@ -6,10 +6,10 @@ use crate::{
     nu::{run_compiler, IdeComplete, IdeGotoDef, IdeHover},
 };
 
-use tower_lsp::jsonrpc::Result;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
-use tower_lsp::LanguageServer;
+use tower_lsp::{jsonrpc::Result, lsp_types::notification::DidChangeConfiguration};
+use tower_lsp::{lsp_types::notification::Notification, LanguageServer};
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
@@ -25,6 +25,14 @@ impl LanguageServer for Backend {
                 .log_message(MessageType::ERROR, format!("{e:?}"))
                 .await;
         };
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        if let Err(e) = self.try_did_change_configuration(params).await {
+            self.client
+                .log_message(MessageType::ERROR, format!("{e:?}"))
+                .await;
+        }
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
@@ -64,6 +72,16 @@ impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         // panic: this is the only place we `OnceLock::set`,
         // so we've entered strange territory if something else writes to them first
+
+        self.can_change_configuration
+            .set(matches!(
+                params.capabilities.workspace,
+                Some(WorkspaceClientCapabilities {
+                    did_change_configuration: Some(_),
+                    ..
+                })
+            ))
+            .expect("server value initialized out of sequence");
 
         self.can_lookup_configuration
             .set(matches!(
@@ -116,6 +134,26 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _params: InitializedParams) {
+        if *self.can_change_configuration.get().unwrap_or(&false) {
+            let method = String::from(DidChangeConfiguration::METHOD);
+            if let Err(e) = self
+                .client
+                .register_capability(vec![Registration {
+                    id: method.clone(),
+                    method,
+                    register_options: None,
+                }])
+                .await
+            {
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("unable to register capability: {e:?}"),
+                    )
+                    .await;
+            };
+        }
+
         self.client
             .log_message(MessageType::INFO, "server initialized!")
             .await;

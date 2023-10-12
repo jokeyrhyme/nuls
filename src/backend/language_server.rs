@@ -105,12 +105,15 @@ impl LanguageServer for Backend {
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                // `nu --ide-complete`
                 completion_provider: Some(CompletionOptions::default()),
-                // `nu --ide-goto-def`
                 definition_provider: Some(OneOf::Left(true)),
-                // `nu --ide-hover`
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+                    InlayHintOptions {
+                        resolve_provider: Some(false),
+                        ..Default::default()
+                    },
+                ))),
                 // TODO: what do we do when the client doesn't support UTF-16 ?
                 // lsp-textdocument crate requires UTF-16
                 position_encoding: Some(PositionEncodingKind::UTF16),
@@ -285,5 +288,14 @@ impl LanguageServer for Backend {
             contents: HoverContents::Scalar(MarkedString::String(hover.hover)),
             range,
         }))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let document_inlay_hints = self.document_inlay_hints.read().map_err(|e| {
+            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "cannot read from inlay hints cache: {e:?}"
+            ))
+        })?;
+        Ok(document_inlay_hints.get(&params.text_document.uri).cloned())
     }
 }

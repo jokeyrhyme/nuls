@@ -4,9 +4,10 @@ use std::time::{Duration, Instant};
 use std::{ffi::OsStr, sync::RwLock};
 
 pub(crate) mod language_server;
+use crate::nu::{IdeCheckHint, IdeCheckResponse};
 use crate::{
     error::map_err_to_internal_error,
-    nu::{run_compiler, IdeCheck, IdeCheckDiagnostic, IdeSettings},
+    nu::{run_compiler, IdeCheckDiagnostic, IdeSettings},
 };
 use lsp_textdocument::{FullTextDocument, TextDocuments};
 
@@ -25,6 +26,7 @@ pub(crate) struct Backend {
     can_publish_diagnostics: OnceLock<bool>,
     client: Client,
     documents: RwLock<TextDocuments>,
+    document_inlay_hints: RwLock<HashMap<Url, Vec<InlayHint>>>,
     document_settings: RwLock<HashMap<Url, IdeSettings>>,
     global_settings: RwLock<IdeSettings>,
     last_validated: RwLock<Instant>,
@@ -112,6 +114,7 @@ impl Backend {
             can_publish_diagnostics: OnceLock::new(),
             client,
             documents: RwLock::new(TextDocuments::new()),
+            document_inlay_hints: RwLock::new(HashMap::new()),
             document_settings: RwLock::new(HashMap::new()),
             global_settings: RwLock::new(IdeSettings::default()),
             last_validated: RwLock::new(Instant::now()),
@@ -227,23 +230,17 @@ impl Backend {
         let text = self.for_document(uri, &|doc| String::from(doc.get_content(None)))?;
 
         let ide_settings = self.get_document_settings(uri).await?;
+        let show_inferred_types = ide_settings.hints.show_inferred_types;
         let output =
             run_compiler(&text, vec![OsStr::new("--ide-check")], ide_settings, uri).await?;
 
-        let ide_checks: Vec<IdeCheck> = output
-            .stdout
-            .lines()
-            .filter_map(|l| serde_json::from_slice(l.as_bytes()).ok())
-            .collect();
+        let ide_checks = IdeCheckResponse::from_compiler_response(&output);
 
         let (diagnostics, version) = self.for_document(uri, &|doc| {
             (
                 ide_checks
+                    .diagnostics
                     .iter()
-                    .filter_map(|c| match c {
-                        IdeCheck::Diagnostic(d) => Some(d),
-                        IdeCheck::Hint(_) => None,
-                    })
                     .map(|d| IdeCheckDiagnostic::to_diagnostic(d, doc, uri))
                     .collect::<Vec<_>>(),
                 doc.version(),
@@ -253,6 +250,21 @@ impl Backend {
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, Some(version))
             .await;
+
+        if show_inferred_types {
+            let inlay_hints = self.for_document(uri, &|doc| {
+                ide_checks
+                    .inlay_hints
+                    .iter()
+                    .map(|d| IdeCheckHint::to_inlay_hint(d, doc))
+                    .collect::<Vec<_>>()
+            })?;
+
+            let mut documents = self.document_inlay_hints.write().map_err(|e| {
+                map_err_to_internal_error(&e, format!("cannot write inlay hints cache: {e:?}"))
+            })?;
+            documents.insert(uri.clone(), inlay_hints);
+        }
 
         Ok(())
     }

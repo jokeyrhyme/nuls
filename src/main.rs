@@ -1,6 +1,7 @@
 #![deny(clippy::all, clippy::pedantic, unsafe_code)]
 
 mod backend;
+mod deserialize;
 mod error;
 mod nu;
 use backend::Backend;

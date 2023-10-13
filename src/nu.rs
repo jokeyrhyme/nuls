@@ -178,6 +178,7 @@ pub(crate) struct IdeSettings {
     pub hints: IdeSettingsHints,
     pub include_dirs: Vec<PathBuf>,
     pub max_number_of_problems: u32,
+    #[serde(deserialize_with = "crate::deserialize::into_duration_ms")]
     pub max_nushell_invocation_time: Duration,
     pub nushell_executable_path: PathBuf,
 }
